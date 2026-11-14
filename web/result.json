@@ -1,0 +1,215 @@
+{
+  "schema": "result-board",
+  "schema_version": 1,
+  "generated_by": "app/evaluate.py",
+  "generated_at": "2026-11-14T08:43:04+08:00",
+  "is_mock": false,
+  "backend": "real",
+  "model_id": "deepseek-flash",
+  "note": "本文件由 app/evaluate.py 现场跑出：holdout 20 题，每条血脉逐题真实调用，判分走 executor.judge 精确比对。",
+  "metric": {
+    "name": "留出集正确率",
+    "short": "holdout acc",
+    "unit": "%",
+    "n_tasks": 20,
+    "higher_is_better": true,
+    "definition": "每条血脉对 20 道从未参与演化的 holdout 题作答，由执行器精确判分，取完全正确题数除以总题数"
+  },
+  "lineage_order": [
+    "champion",
+    "ancestor_seed_1",
+    "ancestor_seed_2"
+  ],
+  "runs": [
+    {
+      "run_id": "E_real_20261114_r1",
+      "tag": "第 1 趟",
+      "condition": "E",
+      "condition_note": "完整代事务 · 同一批基因留出重测",
+      "generations": 20,
+      "status": "ok",
+      "calls": 60,
+      "duration_min": 1.2,
+      "started_at": "2026-11-14T08:40:36+08:00",
+      "lineages": [
+        {
+          "key": "champion",
+          "label": "末代冠军",
+          "kind": "champion",
+          "color": "s3",
+          "final_rank": 1,
+          "n_individuals": 6,
+          "holdout": {
+            "correct": 19,
+            "total": 20
+          }
+        },
+        {
+          "key": "ancestor_seed_1",
+          "label": "固定祖先 · 第 0 代 #1",
+          "kind": "ancestor",
+          "color": "s1",
+          "final_rank": 1,
+          "n_individuals": 6,
+          "holdout": {
+            "correct": 20,
+            "total": 20
+          }
+        },
+        {
+          "key": "ancestor_seed_2",
+          "label": "固定祖先 · 第 0 代 #2",
+          "kind": "ancestor",
+          "color": "s2",
+          "final_rank": 2,
+          "n_individuals": 6,
+          "holdout": {
+            "correct": 20,
+            "total": 20
+          }
+        }
+      ]
+    },
+    {
+      "run_id": "E_real_20261114_r2",
+      "tag": "第 2 趟",
+      "condition": "E",
+      "condition_note": "完整代事务 · 同一批基因留出重测",
+      "generations": 20,
+      "status": "ok",
+      "calls": 60,
+      "duration_min": 1.2,
+      "started_at": "2026-11-14T08:41:49+08:00",
+      "lineages": [
+        {
+          "key": "champion",
+          "label": "末代冠军",
+          "kind": "champion",
+          "color": "s3",
+          "final_rank": 1,
+          "n_individuals": 6,
+          "holdout": {
+            "correct": 20,
+            "total": 20
+          }
+        },
+        {
+          "key": "ancestor_seed_1",
+          "label": "固定祖先 · 第 0 代 #1",
+          "kind": "ancestor",
+          "color": "s1",
+          "final_rank": 1,
+          "n_individuals": 6,
+          "holdout": {
+            "correct": 20,
+            "total": 20
+          }
+        },
+        {
+          "key": "ancestor_seed_2",
+          "label": "固定祖先 · 第 0 代 #2",
+          "kind": "ancestor",
+          "color": "s2",
+          "final_rank": 2,
+          "n_individuals": 6,
+          "holdout": {
+            "correct": 20,
+            "total": 20
+          }
+        }
+      ]
+    },
+    {
+      "run_id": "E_real_20261114_r3",
+      "tag": "第 3 趟",
+      "condition": "E",
+      "condition_note": "完整代事务 · 同一批基因留出重测",
+      "generations": 20,
+      "status": "ok",
+      "calls": 60,
+      "duration_min": 1.3,
+      "started_at": "2026-11-14T08:43:04+08:00",
+      "lineages": [
+        {
+          "key": "champion",
+          "label": "末代冠军",
+          "kind": "champion",
+          "color": "s3",
+          "final_rank": 1,
+          "n_individuals": 6,
+          "holdout": {
+            "correct": 20,
+            "total": 20
+          }
+        },
+        {
+          "key": "ancestor_seed_1",
+          "label": "固定祖先 · 第 0 代 #1",
+          "kind": "ancestor",
+          "color": "s1",
+          "final_rank": 1,
+          "n_individuals": 6,
+          "holdout": {
+            "correct": 20,
+            "total": 20
+          }
+        },
+        {
+          "key": "ancestor_seed_2",
+          "label": "固定祖先 · 第 0 代 #2",
+          "kind": "ancestor",
+          "color": "s2",
+          "final_rank": 2,
+          "n_individuals": 6,
+          "holdout": {
+            "correct": 20,
+            "total": 20
+          }
+        }
+      ]
+    }
+  ],
+  "conclusion": {
+    "level": "none",
+    "text": "3 趟重测中，末代冠军的留出正确率相对最好祖先为 -5.0 / +0.0 / +0.0 个百分点，方向不一致或差值在单题分辨率之内；未观察到稳定改善。",
+    "evidence": [
+      {
+        "run_id": "E_real_20261114_r1",
+        "text": "冠军 19/20 对最好祖先 20/20（ancestor_seed_1），差 -5.0 个百分点"
+      },
+      {
+        "run_id": "E_real_20261114_r2",
+        "text": "冠军 20/20 对最好祖先 20/20（ancestor_seed_1），差 +0.0 个百分点"
+      },
+      {
+        "run_id": "E_real_20261114_r3",
+        "text": "冠军 20/20 对最好祖先 20/20（ancestor_seed_1），差 +0.0 个百分点"
+      }
+    ],
+    "caveat": "留出集 20 题，单个个体正确率的分辨率为 5.0 个百分点，本次重测的极差为 5.0 个百分点；差值小于分辨率时视为噪声，本结论不外推到 20 题以外的难度分布。本次最好成绩 20/20，3/3 趟中所有比较对象均不低于 19/20：留出集对该模型已接近触顶，绝对正确率不再具备区分度，只能看方向。"
+  },
+  "provenance": {
+    "source": "holdout evaluation",
+    "script": "app/evaluate.py",
+    "history": "runs/E_real_20261114/history.jsonl",
+    "runs_count": 3,
+    "replicates": 3,
+    "lineage_ids": {
+      "champion": "20代 G03",
+      "ancestor_seed_1": "0代 G01",
+      "ancestor_seed_2": "0代 G02"
+    },
+    "calls_total": 180,
+    "tokens_out_total": 218171,
+    "max_tokens": 12000,
+    "budget_note": "max_tokens=12000；被预算截断的题按未答对计入 holdout.correct，并在此单列，共 0 题次",
+    "infra_truncated": 0,
+    "evidence_dir": "runs/eval_20261114_083923",
+    "delta_pp": [
+      -5.0,
+      0.0,
+      0.0
+    ],
+    "payload_sha256": "278cdee1c10f145fb01d038c64342fd5b97f09f615bf8a0ffc018e09c30e2f29"
+  }
+}

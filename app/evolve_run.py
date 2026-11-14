@@ -1,0 +1,419 @@
+"""20 代演化运行器：产出 runs/<run_id>/history.jsonl，供大屏读真数据。
+
+**为什么单独一个模块**
+
+`demo.py` 是双跑（2 代）对照，只回答一个问题：学习有没有用。
+大屏问的是另一个问题：20 代里种群怎么演化、祖先题失败率怎么动。
+两者共用 `learn_from` / `build_check_instruction` / `judge`，但节奏不同：
+双跑每趟 20 题只要一个总数，演化每代要评整个种群 + 三族冻结祖先题。
+
+**每个数字都必须来自一次真实调用**
+
+大屏最容易造假的地方不是曲线，是"个体分"。如果 6 个体的分只差在随机噪声上，
+那叫抽签，不叫演化。所以这里让基因**真的进 prompt**：
+
+    genes.solve_prompt  → system prompt 的 {solve_prompt} 占位符
+    genes.self_check    → 是否注入按 state 规则渲染的检查指令
+
+于是"self_check=true 的个体比 false 的高"是跑出来的，不是写出来的。
+
+**每代测什么（全部落 usage / timing）**
+
+    ancestor  3 族冻结题（积分 / 行列式 / 平衡）各 n_ancestor 道，由当代冠军代言
+    common    每个个体 n_common 道共同题（同一批，横向可比）
+    set       答案可用率（非空、未被 max_tokens 截断）→ 格式自检分
+
+**已知偏差，写在 manifest 里，不藏**
+
+    · 没有出题（setter）角色，`set` 用"答案可用率"占位，非 B 的出题分
+    · 没有 peer 互评，`slots.peer = 0`
+    · 挑战题需要 B 的 challenge 队列，本次不注入（`slots.challenge = 0`）
+
+用法：
+    export LLM_API_KEY=...
+    python -m app.evolve_run --run-id E_real_20261114
+    python app/export.py --run runs/E_real_20261114 --out web/history.json
+"""
+from __future__ import annotations
+
+import argparse
+import concurrent.futures as cf
+import json
+import os
+import random
+import sys
+import time
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
+
+from app import llm_standalone as L                      # noqa: E402
+from app.demo import (                                   # noqa: E402
+    CONCURRENCY, RUNS, WEB, _coerce_verdict,
+    build_check_instruction, frozen_fingerprint, learn_from,
+    load_bank, seed_state, solver_view_local,
+)
+from app.executor import judge as _judge                  # noqa: E402
+
+CONFIG = ROOT / "config.json"
+PROMPTS = ROOT / "prompts"
+
+#: 规则条数上限。规则是拼进提示词的文字，累积 20 代会把 prompt 撑爆，
+#: 反而挤掉题目。保留最近的 N 条，等于"只记最近还犯的错"。
+MAX_RULES_IN_PROMPT = 6
+
+#: 三族祖先题的构成：族名 → 从哪些题型里抽
+ANCESTOR_MIX = {
+    "integral_failure": ("integral",),
+    "det_failure": ("det",),
+    "balanced_failure": ("integral", "det"),
+}
+
+SEED_GENES = (
+    {"solve_prompt": "逐步求解，最后只输出答案。", "self_check": False},
+    {"solve_prompt": "先判断题型，再选对应方法；分数一律用精确分数运算，不写近似小数。",
+     "self_check": True},
+    {"solve_prompt": "先写出解题提纲（几步、每步算什么），再逐步计算，最后一行只写答案。",
+     "self_check": True},
+)
+
+
+def load_cfg() -> dict:
+    return json.loads(CONFIG.read_text(encoding="utf-8"))
+
+
+# ────────────────────────────── 题库 ──────────────────────────────
+def build_pools(seed: int) -> tuple[dict[str, list[dict]], list[dict]]:
+    """切成冻结的祖先族 + 可轮换的共同题池。
+
+    祖先题必须全程冻结 —— 换题就失去"同一把尺子量 20 代"的意义。
+    共同题每代换一批，否则模型把题背下来，曲线照样上升但没意义。
+    """
+    rng = random.Random(seed)
+    calib = load_bank(ROOT / "data" / "calibration.json")
+    common_pool = load_bank(ROOT / "data" / "common_dev.json")
+
+    by_type: dict[str, list[dict]] = {}
+    for row in calib:
+        by_type.setdefault(row["family"], []).append(row)
+
+    ancestors: dict[str, list[dict]] = {}
+    used: set[str] = set()
+    for fam, types in ANCESTOR_MIX.items():
+        picked: list[dict] = []
+        for t in types:
+            cands = [r for r in by_type.get(t, []) if r["task"]["id"] not in used]
+            rng.shuffle(cands)
+            need = 3 if len(types) == 1 else 2
+            for r in cands[:need]:
+                picked.append(r)
+                used.add(r["task"]["id"])
+        ancestors[fam] = picked
+
+    rng.shuffle(common_pool)
+    return ancestors, common_pool
+
+
+# ────────────────────────────── 单次作答 ──────────────────────────────
+def _template() -> str:
+    p = PROMPTS / "solver.md"
+    return p.read_text(encoding="utf-8") if p.exists() else ""
+
+
+def make_solver(max_tokens: int):
+    tpl = _template()
+
+    def solve(row: dict, genes: dict, check: str) -> dict:
+        t0 = time.time()
+        view = solver_view_local(row)
+        system = (tpl.replace("{solve_prompt}", genes["solve_prompt"])
+                  .replace("{check_instruction}", check if genes.get("self_check") else "")
+                  ).strip()
+        user = f"{view['statement']}\n\n答案格式：{view['answer_format']}"
+        msgs = ([{"role": "system", "content": system}] if system else []) + \
+               [{"role": "user", "content": user}]
+        try:
+            text, tin, tout = L.complete(msgs, max_tokens=max_tokens)
+            ok, why = _coerce_verdict(_judge(row["task"], text))
+            usable = bool((text or "").strip())
+            # 预算被推理吃光 = 我们给的额度不够，不是模型不会。2026-11-13 双跑里
+            # 这个区别没分清，学习器从"截断"里归纳出了假规则。这里同一口径：
+            # 空答案且输出顶到上限 → 记 infra，不进能力分、不进学习。
+            truncated = (not usable) and tout >= max_tokens - 50
+            return {"correct": ok, "reason": why or ("输出被 max_tokens 截断" if truncated else None),
+                    "usable": usable, "infra": truncated,
+                    "tokens_in": tin, "tokens_out": tout,
+                    "latency_s": round(time.time() - t0, 2)}
+        except Exception as exc:  # noqa: BLE001
+            # 基建故障不算能力，但也不能悄悄丢掉：记 infra，分数不计入能力分
+            return {"correct": False, "reason": f"调用异常：{exc}", "usable": False,
+                    "infra": True, "tokens_in": 0, "tokens_out": 0,
+                    "latency_s": round(time.time() - t0, 2)}
+    return solve
+
+
+def run_batch(jobs: list[tuple], solver, workers: int) -> list[dict]:
+    """jobs = [(row, genes, check), ...]，并发执行，返回同序结果。"""
+    out: list[dict] = [None] * len(jobs)  # type: ignore[list-item]
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(solver, row, genes, check): i
+                for i, (row, genes, check) in enumerate(jobs)}
+        for f in cf.as_completed(futs):
+            out[futs[f]] = f.result()
+    return out
+
+
+# ────────────────────────────── 演化算子 ──────────────────────────────
+def crossover(a: dict, b: dict, gid: str, gen: int) -> dict:
+    """交叉：解题策略取前半句 + 后半句，自检开关取或。
+
+    参数是**个体**（含 genes / meta），不是 genes —— 这里踩过一次坑：
+    传 genes 进来会在 a["solve_prompt"] 上 KeyError，而崩的是第 0 代的
+    演化步，表现为"跑了几分钟一行没写"。算子必须和个体结构对齐。
+
+    刻意做成"句子级"而不是"字符级"：字符级交叉会产出语法破碎的 prompt，
+    而 prompt 是给模型读的，破碎即等于关掉这项能力 —— 那不是交叉，是噪音。
+    """
+    ga, gb = a["genes"], b["genes"]
+    pa = [s for s in ga["solve_prompt"].replace("；", "。").split("。") if s.strip()]
+    pb = [s for s in gb["solve_prompt"].replace("；", "。").split("。") if s.strip()]
+    head = pa[0] if pa else ""
+    tail = pb[-1] if pb else ""
+    text = (head + "。" + tail + "。") if tail and tail != head else (head + "。")
+    return {"genes": {"solve_prompt": text.strip()[:200],
+                      "self_check": bool(ga.get("self_check") or gb.get("self_check"))},
+            "meta": {"id": gid, "parents": [a.get("_id"), b.get("_id")],
+                     "origin": "crossover", "born_gen": gen + 1}}
+
+
+def mutate(p: dict, gid: str, gen: int, rule_text: str | None) -> dict:
+    """变异：把一条真实学到的规则写进解题策略，或翻转自检开关。"""
+    genes = dict(p["genes"])
+    if rule_text:
+        genes["solve_prompt"] = (genes["solve_prompt"].rstrip("。") + "。" +
+                                 rule_text.split("：")[-1].strip("。") + "。")[:200]
+    else:
+        genes["self_check"] = not genes.get("self_check")
+    return {"genes": genes,
+            "meta": {"id": gid, "parents": [p.get("_id")], "origin": "mutation",
+                     "born_gen": gen + 1}}
+
+
+# ────────────────────────────── 主循环 ──────────────────────────────
+def run(run_id: str, gens: int | None = None, seed: int | None = None) -> dict:
+    cfg = load_cfg()
+    n_gen = int(gens if gens is not None else cfg.get("n_gen", 20))
+    n_pop = int(cfg.get("n_pop", 6))
+    n_common = int(cfg.get("n_common", 4))
+    n_survive = int(cfg.get("n_survive", 3))
+    n_cross = int(cfg.get("n_crossover", 2))
+    n_mut = int(cfg.get("n_mutate", 1))
+    window = int(cfg.get("fitness_window", 2))
+    set_weight = float(cfg.get("set_weight", 2.0))
+    bounty_v = float(cfg.get("bounty", 2.0))
+    workers = int(cfg.get("concurrency", CONCURRENCY))
+    max_tok = L.budget("solver", 4000)
+    data_seed = int(seed if seed is not None else cfg.get("data_seed", 1001))
+
+    ancestors, common_pool = build_pools(data_seed)
+    solver = make_solver(max_tok)
+
+    run_dir = RUNS / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    hist_path = run_dir / "history.jsonl"
+    hist_path.write_text("", encoding="utf-8")
+
+    state = seed_state()
+    fp = frozen_fingerprint()
+    model_id = L.preflight()["model"]
+    print(f"→ 运行 {run_id}：{n_gen} 代 × 每代 {n_pop} 个体，model={model_id}，"
+          f"预算 {max_tok} tok，并发 {workers}", flush=True)
+
+    pop = []
+    for i in range(n_pop):
+        genes = dict(SEED_GENES[i % len(SEED_GENES)])
+        pop.append({"genes": genes,
+                    "meta": {"id": f"G{i + 1:02d}", "parents": [], "origin": "seed",
+                             "born_gen": 0},
+                    "_id": f"G{i + 1:02d}"})
+
+    totals_hist: dict[str, list[float]] = {p["_id"]: [] for p in pop}
+    champion = pop[0]
+    lines: list[dict] = []
+
+    for gen in range(n_gen + 1):
+        t_gen = time.time()
+        check = build_check_instruction(state)
+
+        # ── 1. 每个个体在共同的 n_common 题上作答（横向可比）
+        slice_i = (gen * n_common) % max(1, len(common_pool) - n_common)
+        common = common_pool[slice_i: slice_i + n_common]
+        jobs = [(row, p["genes"], check) for p in pop for row in common]
+        res = run_batch(jobs, solver, workers)
+
+        inds = []
+        usage = {"call_count": 0, "input_tokens": 0, "output_tokens": 0,
+                 "reasoning_tokens": 0, "cost": None}
+        infra_n = 0
+        for k, p in enumerate(pop):
+            chunk = res[k * n_common:(k + 1) * n_common]
+            cap = [r for r in chunk if not r["infra"]]
+            acc = (sum(1 for r in cap if r["correct"]) / len(cap)) if cap else 0.0
+            usable = (sum(1 for r in cap if r["usable"]) / len(cap)) if cap else 0.0
+            infra_n += sum(1 for r in chunk if r["infra"])
+            solve_score = round(5.0 * acc, 2)
+            set_score = round(set_weight * usable, 2)
+            total = round(solve_score + set_score, 2)
+            totals_hist[p["_id"]].append(total)
+            k_samples = min(window, len(totals_hist[p["_id"]]))
+            est = round(sum(totals_hist[p["_id"]][-k_samples:]) / k_samples, 3)
+            inds.append({"id": p["_id"], "solve": solve_score, "set": set_score,
+                         "bounty": 0.0, "total": total, "est": est,
+                         "n_samples": max(1, k_samples)})
+            for r in chunk:
+                usage["call_count"] += 1
+                usage["input_tokens"] += r["tokens_in"]
+                usage["output_tokens"] += r["tokens_out"]
+
+        ranking = [i["id"] for i in sorted(inds, key=lambda x: -x["est"])]
+        champion = next(p for p in pop if p["_id"] == ranking[0])
+
+        # ── 2. 三族冻结祖先题，由当代冠军代言
+        anc_jobs, anc_keys = [], []
+        for fam, rows in ancestors.items():
+            for row in rows:
+                anc_jobs.append((row, champion["genes"], check))
+                anc_keys.append(fam)
+        anc_res = run_batch(anc_jobs, solver, workers)
+        ancestor: dict[str, float] = {}
+        for r, fam in zip(anc_res, anc_keys):
+            usage["call_count"] += 1
+            usage["input_tokens"] += r["tokens_in"]
+            usage["output_tokens"] += r["tokens_out"]
+            if r["infra"]:
+                infra_n += 1
+                continue
+            d = ancestor.setdefault(fam, [0, 0])
+            d[1] += 1
+            d[0] += 0 if r["correct"] else 1
+        ancestor_out = {fam: round(v[0] / v[1], 6) if v[1] else None
+                        for fam, v in ((f, ancestor.get(f, [0, 0])) for f in ancestors)}
+
+        # ── 3. 学习：用本代的失败归纳规则（真实失败才归纳）
+        per_task = []
+        for (row, _g, _c), r in zip(jobs, res):
+            per_task.append({"id": row["task"]["id"], "family": row["family"],
+                             "correct": r["correct"], "infra": r["infra"],
+                             "reason": r.get("reason")})
+        before_rules = len(state.get("rules") or [])
+        state = learn_from({"per_task": per_task}, state)
+        if len(state["rules"]) > MAX_RULES_IN_PROMPT:
+            keep = state["rules"][-MAX_RULES_IN_PROMPT:]
+            state["rules"] = keep
+        gained = len(state["rules"]) - before_rules
+
+        wall_ms = int((time.time() - t_gen) * 1000)
+        rec = {
+            "schema_version": "5.1", "run_id": run_id, "condition": cfg.get("condition", "E"),
+            "gen": gen, "status": "completed", "M": n_pop, "refetch_round": 0,
+            "task_counts": {"integral": sum(1 for r in common if r["family"] == "integral"),
+                            "det": sum(1 for r in common if r["family"] == "det")},
+            "slots": {"peer": 0, "common": n_common * n_pop,
+                      "ancestor": len(anc_jobs), "challenge": 0},
+            "ancestor": ancestor_out,
+            "individuals": inds,
+            "ranking": ranking,
+            "evaluated_population": [{"genes": p["genes"], "meta": p["meta"]} for p in pop],
+            "next_population": None,
+            "challenges": [],
+            "timing": {"wall_ms": wall_ms,
+                       "role_ms": {"common": wall_ms, "ancestor": 0}},
+            "usage": usage,
+            "warnings": [
+                "本次未注入挑战题（需 B 的 challenge 队列），slots.challenge=0",
+                *([f"{infra_n} 次调用属基础设施异常，已排除在能力分之外"] if infra_n else []),
+            ],
+        }
+
+        # ── 4. 下一代：精英保留 + 交叉 + 变异
+        if gen < n_gen:
+            survivors = [p for p in pop if p["_id"] in ranking[:n_survive]]
+            nxt = list(survivors)
+            for j in range(n_cross):
+                a, b = random.sample(survivors, 2)
+                nxt.append(crossover(a, b, f"G{gen:02d}X{j + 1}", gen))
+            rule_text = (state["rules"][-1]["text"] if gained and state["rules"] else None)
+            for j in range(n_mut):
+                nxt.append(mutate(survivors[j % len(survivors)],
+                                  f"G{gen:02d}M{j + 1}", gen, rule_text))
+            nxt = nxt[:n_pop]
+            for p in nxt:
+                p.setdefault("_id", p["meta"]["id"])
+                # 新个体从零开始记分。**不能**继承父代的成绩历史：
+                # 那会让 est 变成"世袭均分"，页面上的分就不再是这一个体自己考的。
+                # 首代 n_samples=1，est 就是本代实测分，口径干净。
+                totals_hist.setdefault(p["_id"], [])
+            rec["next_population"] = [{"genes": p["genes"], "meta": p["meta"]} for p in nxt]
+            pop = nxt
+
+        with hist_path.open("a", encoding="utf-8", newline="\n") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        lines.append(rec)
+
+        anc_txt = " ".join(f"{k.split('_')[0]}={v:.2f}" if v is not None else f"{k}=?"
+                           for k, v in ancestor_out.items())
+        print(f"  g{gen:<2} 冠军 {ranking[0]} total={max(i['total'] for i in inds):.2f} "
+              f"| 祖先失败率 {anc_txt} | 规则 {len(state['rules'])} 条 | {wall_ms}ms",
+              flush=True)
+
+    manifest = {
+        "run_id": run_id,
+        "backend": "real",
+        "is_mock": False,
+        "model_id": model_id,
+        "n_gen": n_gen,
+        "n_pop": n_pop,
+        "config_sha256": fp["config_sha256"],
+        "prompts_sha256": fp["prompts_sha256"],
+        "max_tokens_solver": max_tok,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "notes": [
+            "set 分 = 答案可用率 × set_weight，本运行器无出题（setter）角色",
+            "ancestor 由当代冠军代言，非全员评估",
+            "学习输入只取本代共同题的失败；祖先题是量尺，不参与训练，否则等于用考卷当练习册",
+            "挑战题未注入，slots.challenge=0",
+            f"规则最多保留 {MAX_RULES_IN_PROMPT} 条以控制提示词长度",
+        ],
+    }
+    (run_dir / "manifest.json").write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
+
+    calls = sum(r["usage"]["call_count"] for r in lines)
+    print(f"✓ 完成 {len(lines)} 代 → {hist_path.relative_to(ROOT)}（{calls} 次调用）",
+          flush=True)
+    return manifest
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="20 代演化（真跑，产 history.jsonl）")
+    ap.add_argument("--run-id", required=True)
+    ap.add_argument("--gens", type=int, default=None, help="默认读 config.n_gen")
+    ap.add_argument("--seed", type=int, default=None, help="题库抽样种子")
+    ap.add_argument("--export", action="store_true", help="跑完顺手导出到 web/")
+    a = ap.parse_args(argv)
+
+    if not os.environ.get("LLM_API_KEY"):
+        print("✗ 没有 LLM_API_KEY（config.api_key_env 指向它）", file=sys.stderr)
+        return 2
+    run(a.run_id, a.gens, a.seed)
+
+    if a.export:
+        from app.export import main as export_main
+        return export_main(["--run", str(RUNS / a.run_id),
+                            "--out", str(WEB / "history.json")])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

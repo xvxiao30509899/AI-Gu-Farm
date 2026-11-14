@@ -1,0 +1,536 @@
+{
+ "schema": "evolve-demo",
+ "schema_version": 1,
+ "pair_id": "demo_pair_calib",
+ "model_id": "deepseek-flash",
+ "backend": "real",
+ "is_mock": false,
+ "frozen": {
+  "config_sha256": "171b6e0d094ed231",
+  "prompts_sha256": "88c617895752be8a",
+  "n_prompt_files": 5,
+  "identical_across_passes": true,
+  "note": "两次之间 config.json 与 prompts/ 的 SHA-256 逐字节一致，改动只落在 state/current.json"
+ },
+ "metric": {
+  "name": "固定题库正确率",
+  "short": "correct rate",
+  "unit": "%",
+  "n_tasks": 20,
+  "higher_is_better": true,
+  "definition": "20 道冻结验证题（2 族）中判分完全正确的题数占比；判分由 executor 精确计算，不经 LLM 裁判"
+ },
+ "passes": [
+  {
+   "pass": 1,
+   "duration_s": 20.7,
+   "correct": 20,
+   "total": 20,
+   "accuracy": 1.0,
+   "per_task": [
+    {
+     "id": "K01",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 17,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 134,
+     "tokens_out": 119,
+     "latency_s": 2.0
+    },
+    {
+     "id": "K02",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 22,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 131,
+     "tokens_out": 376,
+     "latency_s": 3.49
+    },
+    {
+     "id": "K03",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 17,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 130,
+     "tokens_out": 110,
+     "latency_s": 2.12
+    },
+    {
+     "id": "K04",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 16,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 128,
+     "tokens_out": 104,
+     "latency_s": 1.81
+    },
+    {
+     "id": "K05",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 18,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 130,
+     "tokens_out": 61,
+     "latency_s": 1.56
+    },
+    {
+     "id": "K06",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 21,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 131,
+     "tokens_out": 216,
+     "latency_s": 2.19
+    },
+    {
+     "id": "K07",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 14,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 128,
+     "tokens_out": 144,
+     "latency_s": 1.67
+    },
+    {
+     "id": "K08",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 18,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 131,
+     "tokens_out": 118,
+     "latency_s": 1.08
+    },
+    {
+     "id": "K09",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 15,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 130,
+     "tokens_out": 108,
+     "latency_s": 1.48
+    },
+    {
+     "id": "K10",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 17,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 138,
+     "tokens_out": 528,
+     "latency_s": 3.03
+    },
+    {
+     "id": "K11",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 17,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 194,
+     "tokens_out": 3998,
+     "latency_s": 17.86
+    },
+    {
+     "id": "K12",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 17,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 168,
+     "tokens_out": 2879,
+     "latency_s": 14.02
+    },
+    {
+     "id": "K13",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 16,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 167,
+     "tokens_out": 1382,
+     "latency_s": 7.54
+    },
+    {
+     "id": "K14",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 16,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 147,
+     "tokens_out": 257,
+     "latency_s": 1.96
+    },
+    {
+     "id": "K15",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 15,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 168,
+     "tokens_out": 1247,
+     "latency_s": 6.41
+    },
+    {
+     "id": "K16",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 16,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 147,
+     "tokens_out": 203,
+     "latency_s": 1.53
+    },
+    {
+     "id": "K17",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 17,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 167,
+     "tokens_out": 2595,
+     "latency_s": 12.96
+    },
+    {
+     "id": "K18",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 14,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 147,
+     "tokens_out": 235,
+     "latency_s": 1.98
+    },
+    {
+     "id": "K19",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 16,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 147,
+     "tokens_out": 74,
+     "latency_s": 1.31
+    },
+    {
+     "id": "K20",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 17,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 168,
+     "tokens_out": 2246,
+     "latency_s": 10.76
+    }
+   ],
+   "state_version": "v0_seed",
+   "tokens_in": 2931,
+   "tokens_out": 17000
+  },
+  {
+   "pass": 2,
+   "duration_s": 33.4,
+   "correct": 19,
+   "total": 20,
+   "accuracy": 0.95,
+   "per_task": [
+    {
+     "id": "K01",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 17,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 134,
+     "tokens_out": 104,
+     "latency_s": 1.17
+    },
+    {
+     "id": "K02",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 22,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 131,
+     "tokens_out": 365,
+     "latency_s": 2.43
+    },
+    {
+     "id": "K03",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 17,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 130,
+     "tokens_out": 89,
+     "latency_s": 1.65
+    },
+    {
+     "id": "K04",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 16,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 128,
+     "tokens_out": 105,
+     "latency_s": 1.38
+    },
+    {
+     "id": "K05",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 18,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 130,
+     "tokens_out": 63,
+     "latency_s": 0.96
+    },
+    {
+     "id": "K06",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 21,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 131,
+     "tokens_out": 267,
+     "latency_s": 2.03
+    },
+    {
+     "id": "K07",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 14,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 128,
+     "tokens_out": 105,
+     "latency_s": 1.4
+    },
+    {
+     "id": "K08",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 18,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 131,
+     "tokens_out": 131,
+     "latency_s": 1.1
+    },
+    {
+     "id": "K09",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 15,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 130,
+     "tokens_out": 107,
+     "latency_s": 1.33
+    },
+    {
+     "id": "K10",
+     "family": "integral",
+     "correct": true,
+     "answer_chars": 17,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 138,
+     "tokens_out": 361,
+     "latency_s": 1.89
+    },
+    {
+     "id": "K11",
+     "family": "det",
+     "correct": false,
+     "answer_chars": 0,
+     "reason": "调用异常：输出被 max_tokens 截断：推理已用掉 6000 token，答案没来得及输出。\n  config.json 的 max_tokens_solver 要按「推理 + 答案」之和给，\n  5 阶行列式这类题建议 ≥4000。",
+     "infra": true,
+     "tokens_in": 0,
+     "tokens_out": 0,
+     "latency_s": 0
+    },
+    {
+     "id": "K12",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 17,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 168,
+     "tokens_out": 1870,
+     "latency_s": 9.29
+    },
+    {
+     "id": "K13",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 16,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 167,
+     "tokens_out": 1403,
+     "latency_s": 6.92
+    },
+    {
+     "id": "K14",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 16,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 147,
+     "tokens_out": 392,
+     "latency_s": 2.55
+    },
+    {
+     "id": "K15",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 15,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 168,
+     "tokens_out": 1406,
+     "latency_s": 7.05
+    },
+    {
+     "id": "K16",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 16,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 147,
+     "tokens_out": 372,
+     "latency_s": 2.16
+    },
+    {
+     "id": "K17",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 17,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 167,
+     "tokens_out": 3336,
+     "latency_s": 17.9
+    },
+    {
+     "id": "K18",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 14,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 147,
+     "tokens_out": 300,
+     "latency_s": 1.91
+    },
+    {
+     "id": "K19",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 16,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 147,
+     "tokens_out": 107,
+     "latency_s": 1.16
+    },
+    {
+     "id": "K20",
+     "family": "det",
+     "correct": true,
+     "answer_chars": 17,
+     "reason": null,
+     "infra": false,
+     "tokens_in": 168,
+     "tokens_out": 1958,
+     "latency_s": 9.42
+    }
+   ],
+   "state_version": "v1_learned",
+   "tokens_in": 2737,
+   "tokens_out": 12841
+  }
+ ],
+ "learned": {
+  "rules_added": [],
+  "memories_added": [],
+  "params_changed": [
+   {
+    "key": "verify_depth",
+    "scope": "state",
+    "before": 1,
+    "after": 1
+   },
+   {
+    "key": "fitness_window",
+    "scope": "config",
+    "before": 2,
+    "after": 2
+   }
+  ],
+  "genes_changed": {
+   "solve_prompt_diff_lines": 0,
+   "set_prompt_diff_lines": 0
+  }
+ },
+ "rollback": {
+  "available": true,
+  "snapshot_id": "v0_seed",
+  "snapshot_path": "runs\\demo_pair_calib\\state\\v0_seed.json",
+  "command": "python -m app.demo rollback --pair demo_pair_calib --to v0_seed",
+  "verified": null,
+  "note": "回退后 state/current.json 逐字节恢复为 pass1 之前的版本，规则与记忆全部清空"
+ },
+ "conclusion": {
+  "delta_accuracy_pp": 0.0,
+  "verdict": "no_change",
+  "one_line": "20 道冻结验证题能力正确率 20/20 → 19/19（+0.0 个百分点，单题分辨率 5.0pp）；从 pass1 的 0 个失败族自动生成 0 条解题校验规则、0 条案例记忆，代码与提示词零改动；另有 1 次调用属基础设施异常（截断/超时），已排除在正确率与判定之外",
+  "capability_accuracy": {
+   "pass1": [
+    20,
+    20
+   ],
+   "pass2": [
+    19,
+    19
+   ]
+  },
+  "resolution_pp": 5.0,
+  "infra_excluded": 1
+ }
+}
