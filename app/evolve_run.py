@@ -27,7 +27,8 @@
 
     · 没有出题（setter）角色，`set` 用"答案可用率"占位，非 B 的出题分
     · 没有 peer 互评，`slots.peer = 0`
-    · 挑战题需要 challenge 队列，未接入前 `slots.challenge = 0`
+    · 挑战题取自 data/challenge_pool.json，运行前按 challenge_gens 绑定 ID 与
+      注入时点，运行中不换题；代数不足以容纳完整窗口时不挑战，并写进 manifest
     · 初代 6 个体由 3 条种子铺满，只有 3 份不同基因（manifest 注明）
 
 **E/F 对照怎么跑**
@@ -55,6 +56,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as cf
+import copy
 import json
 import os
 import random
@@ -66,6 +68,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from app import llm_standalone as L                      # noqa: E402
+from app import challenge as CH                          # noqa: E402
 from app.demo import (                                   # noqa: E402
     CONCURRENCY, RUNS, WEB, _coerce_verdict,
     build_check_instruction, frozen_fingerprint, learn_from,
@@ -314,6 +317,31 @@ def run(run_id: str, gens: int | None = None, seed: int | None = None,
     max_tok = L.budget("solver", 4000)
     data_seed = int(seed if seed is not None else cfg.get("data_seed", 1001))
 
+    # ── 挑战题：运行前把题和时点定死 ────────────────────────────────
+    # 规格：「正式运行前固定两道题的 ID、题面、参考答案与注入时点」，
+    # 且「题目不能随运行结果替换」。所以这里只取题库前 N 道，按 born_gen
+    # 顺序绑定，全过程不再重选 —— 即便某道题第一代就被攻克也不换。
+    chal_window = int(cfg.get("challenge_window", 6))
+    chal_threshold = int(cfg.get("threshold_correct", 3))
+    chal_gens = [int(g) for g in (cfg.get("challenge_gens") or [])]
+    challenge_pool: list[dict] = []
+    if chal_gens and chal_gens[-1] + chal_window - 1 > n_gen:
+        # 缩短跑（pilot/冒烟）容不下完整窗口。这里选择「本次不挑战」而不是
+        # 「把窗口截短」：截短后最后一个窗口观察不满，退役原因永远走不到
+        # window_closed，那批题的统计口径就废了。
+        print(f"⚠ n_gen={n_gen} 容不下 born_gen={chal_gens[-1]}+window={chal_window}，"
+              f"本次不注入挑战（属已声明偏差，会写进 manifest）", flush=True)
+        chal_gens = []
+    if chal_gens:
+        CH.validate_schedule({**cfg, "n_gen": n_gen})
+        pool_all = json.loads((ROOT / "data" / "challenge_pool.json")
+                              .read_text(encoding="utf-8"))
+        if len(pool_all) < len(chal_gens):
+            raise SystemExit(f"✗ challenge_pool 只有 {len(pool_all)} 道，"
+                             f"不够 {len(chal_gens)} 个窗口")
+        challenge_pool = pool_all[:len(chal_gens)]
+    eff_cfg = {**cfg, "challenge_gens": chal_gens, "n_gen": n_gen}
+
     ancestors, common_pool = build_pools(data_seed)
     solver = make_solver(max_tok)
 
@@ -322,6 +350,10 @@ def run(run_id: str, gens: int | None = None, seed: int | None = None,
     hist_path = run_dir / "history.jsonl"
 
     state = seed_state()
+    # 挑战状态挂在 state 上，跟着 state.json 一起快照与恢复。
+    # 不另开文件：恢复时状态机与规则/分数序列必须来自同一份快照，
+    # 分两个文件写就会有一边成功一边失败的中间态。
+    state.setdefault("challenges", [])
     fp = frozen_fingerprint()
     model_id = L.preflight()["model"]
 
@@ -355,8 +387,12 @@ def run(run_id: str, gens: int | None = None, seed: int | None = None,
         lines = []
 
     champion = pop[0]
+    challenges: list[dict] = list(state.get("challenges") or [])
+    chal_txt = "、".join(f"{c.get('id')}@g{g}"
+                        for c, g in zip(challenge_pool, chal_gens)) or "无"
     print(f"→ 运行 {run_id}：{n_gen} 代 × 每代 {n_pop} 个体，model={model_id}，"
-          f"预算 {max_tok} tok，并发 {workers}，freeze={freeze}", flush=True)
+          f"预算 {max_tok} tok，并发 {workers}，freeze={freeze}，挑战 {chal_txt}",
+          flush=True)
 
     for gen in range(start_gen, n_gen + 1):
         t_gen = time.time()
@@ -372,6 +408,47 @@ def run(run_id: str, gens: int | None = None, seed: int | None = None,
         usage = {"call_count": 0, "input_tokens": 0, "output_tokens": 0,
                  "reasoning_tokens": 0, "cost": None}
         infra_n = 0
+
+        # ── 1.5 挑战题：活跃期全员必答，固定 n_pop 个槽位
+        # 位置很关键：必须在算个体分数之前。赏金要进本代 total，才能对本代排序
+        # 施加选择压力；放到排序之后结算，赏金就退化成「只写进记录」的一个数字，
+        # 与大纲「挑战赏金产生选择压力」直接相违。
+        bounty_by_id = {p["_id"]: 0.0 for p in pop}
+        chal_note: list[dict] = []
+        for c in CH.plan(eff_cfg, challenges, gen, pool=challenge_pool):
+            challenges.append(c)
+        active_chals = [c for c in challenges
+                        if c.get("state") == "active" and c.get("template")]
+        for c in active_chals:
+            cres = run_batch([({"task": c, "family": "challenge"}, p["genes"], check)
+                              for p in pop], solver, workers)
+            results = []
+            infra_c = 0
+            for p, r in zip(pop, cres):
+                usage["call_count"] += 1
+                usage["input_tokens"] += r["tokens_in"]
+                usage["output_tokens"] += r["tokens_out"]
+                if r["infra"]:
+                    infra_c += 1
+                    infra_n += 1
+                else:
+                    results.append({"id": p["_id"], "correct": 1 if r["correct"] else 0})
+                    if r["correct"]:
+                        bounty_by_id[p["_id"]] += bounty_v
+            # 只有整代全员都拿到有效结果才提交观测。缺一个人就会把 p_t 和
+            # attempt 算错，而 attempt 直接决定窗口何时关闭 —— 这个数一旦错，
+            # 退役时点跟着错，且事后无法从 history 里纠正。
+            if infra_c == 0:
+                upd = CH.observe(c, gen, results, threshold=chal_threshold)
+                challenges = [upd if x.get("task_id") == c["task_id"] else x
+                              for x in challenges]
+                chal_note.append({"task_id": c["task_id"], "gen": gen, "submitted": True,
+                                  "correct": sum(r["correct"] for r in results),
+                                  "state": upd["state"], "reason": upd["retired_reason"]})
+            else:
+                chal_note.append({"task_id": c["task_id"], "gen": gen,
+                                  "submitted": False, "infra": infra_c})
+
         for k, p in enumerate(pop):
             chunk = res[k * n_common:(k + 1) * n_common]
             cap = [r for r in chunk if not r["infra"]]
@@ -380,12 +457,13 @@ def run(run_id: str, gens: int | None = None, seed: int | None = None,
             infra_n += sum(1 for r in chunk if r["infra"])
             solve_score = round(5.0 * acc, 2)
             set_score = round(set_weight * usable, 2)
-            total = round(solve_score + set_score, 2)
+            bon = round(bounty_by_id.get(p["_id"], 0.0), 2)
+            total = round(solve_score + set_score + bon, 2)
             totals_hist[p["_id"]].append(total)
             k_samples = min(window, len(totals_hist[p["_id"]]))
             est = round(sum(totals_hist[p["_id"]][-k_samples:]) / k_samples, 3)
             inds.append({"id": p["_id"], "solve": solve_score, "set": set_score,
-                         "bounty": 0.0, "total": total, "est": est,
+                         "bounty": bon, "total": total, "est": est,
                          "n_samples": max(1, k_samples)})
             for r in chunk:
                 usage["call_count"] += 1
@@ -437,18 +515,26 @@ def run(run_id: str, gens: int | None = None, seed: int | None = None,
             "task_counts": {"integral": sum(1 for r in common if r["family"] == "integral"),
                             "det": sum(1 for r in common if r["family"] == "det")},
             "slots": {"peer": 0, "common": n_common * n_pop,
-                      "ancestor": len(anc_jobs), "challenge": 0},
+                      "ancestor": len(anc_jobs),
+                      "challenge": len(active_chals) * n_pop},
             "ancestor": ancestor_out,
             "individuals": inds,
             "ranking": ranking,
             "evaluated_population": [{"genes": p["genes"], "meta": p["meta"]} for p in pop],
             "next_population": None,
-            "challenges": [],
+            "challenges": copy.deepcopy(challenges),
             "timing": {"wall_ms": wall_ms,
                        "role_ms": {"common": wall_ms, "ancestor": 0}},
             "usage": usage,
             "warnings": [
-                "本次未注入挑战题（需 B 的 challenge 队列），slots.challenge=0",
+                *([f"挑战 {', '.join(c['task_id'] for c in active_chals)} 本代全员必答，"
+                   f"答对赏金 +{bounty_v:g}，赏金计入本代 total 并参与排序"]
+                  if active_chals else []),
+                *([f"本代挑战观测未提交："
+                   f"{sum(1 for x in chal_note if not x.get('submitted'))} 道题存在基础设施异常，"
+                   f"attempt 不推进"] if any(not x.get("submitted") for x in chal_note) else []),
+                *(["本次未注入挑战题（challenge_gens 为空，或代数不足以容纳完整窗口），"
+                   "slots.challenge=0 —— 属已声明偏差，不是运行故障"] if not chal_gens else []),
                 *([f"{infra_n} 次调用属基础设施异常，已排除在能力分之外"] if infra_n else []),
             ],
         }
@@ -469,14 +555,25 @@ def run(run_id: str, gens: int | None = None, seed: int | None = None,
         with hist_path.open("a", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         lines.append(rec)
+        # 挑战状态跟着 state 一起快照。恢复时用它判断「本代是否已注入过」，
+        # 这是 idempotent 注入的唯一依据 —— 内存标记在 --resume 之后不存在。
+        state["challenges"] = challenges
         # 每代落一次快照，供 --resume 从断点续跑（原子写，不会读到半截文件）
         save_state(run_dir, next_gen=gen + 1, population=pop,
                    totals_hist=totals_hist, state=state, freeze=freeze)
 
         anc_txt = " ".join(f"{k.split('_')[0]}={v:.2f}" if v is not None else f"{k}=?"
                            for k, v in ancestor_out.items())
+        bon_txt = ""
+        if active_chals:
+            seg = "  ".join(
+                f"{x['task_id']} {x.get('correct', '?')}/{n_pop}"
+                + (f"→{x['reason']}" if x.get("state") == "retired" else "")
+                for x in chal_note)
+            bon_txt = f" | 挑战 {seg}"
         print(f"  g{gen:<2} 冠军 {ranking[0]} total={max(i['total'] for i in inds):.2f} "
-              f"| 祖先失败率 {anc_txt} | 规则 {len(state['rules'])} 条 | {wall_ms}ms",
+              f"| 祖先失败率 {anc_txt} | 规则 {len(state['rules'])} 条"
+              f"{bon_txt} | {wall_ms}ms",
               flush=True)
 
     manifest = {
@@ -497,11 +594,29 @@ def run(run_id: str, gens: int | None = None, seed: int | None = None,
         "prompts_sha256": fp["prompts_sha256"],
         "max_tokens_solver": max_tok,
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        # ── 挑战协议：ID 与注入时点运行前定死，运行中不可换题 ──────────
+        # 只写 id/template/signature 与窗口参数，**不写 statement 与 reference**。
+        # manifest 会进仓库，第 5 节的导出白名单也可能带它；题面一旦进去，
+        # 等于把挑战题泄给了解题方，这一轮挑战就作废了。
+        "challenge_gens": chal_gens,
+        "challenge_window": chal_window,
+        "threshold_correct": chal_threshold,
+        "challenge_bounty": bounty_v,
+        "challenge_tasks": [
+            {"task_id": c.get("id"), "template": c.get("template"),
+             "signature": c.get("signature"), "born_gen": g, "window": chal_window}
+            for c, g in zip(challenge_pool, chal_gens)
+        ],
+        "challenge_summary": CH.summary(challenges),
         "notes": [
             "set 分 = 答案可用率 × set_weight，本运行器无出题（setter）角色",
             "ancestor 由当代冠军代言，非全员评估",
             "学习输入只取本代共同题的失败；祖先题是量尺，不参与训练，否则等于用考卷当练习册",
-            "挑战题未注入，slots.challenge=0",
+            *(["挑战题已注入，见 challenge_tasks。赏金计入本代 total 并参与排序；"
+               "挑战题不进共同卷均值、不进祖先尺、不进学习输入"]
+              if challenge_pool else
+              ["挑战题未注入（challenge_gens 为空，或代数不足以容纳完整窗口），"
+               "slots.challenge=0 —— 属已声明偏差，不是运行故障"]),
             f"规则最多保留 {MAX_RULES_IN_PROMPT} 条以控制提示词长度",
             f"初代种群由 {len(SEED_GENES)} 条种子按 i%{len(SEED_GENES)} 铺满 {n_pop} 个个体，"
             f"因此 {n_pop} 个个体中只有 {min(len(SEED_GENES), n_pop)} 份不同基因",
