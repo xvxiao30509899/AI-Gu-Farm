@@ -109,6 +109,15 @@
     gap:7px;max-height:302px;overflow:auto;padding-right:2px}
   .cards::-webkit-scrollbar{width:6px}
   .cards::-webkit-scrollbar-thumb{background:var(--line-strong);border-radius:3px}
+
+  /* 运行注记：异常不藏在日志里，逐条摆在页面上 */
+  .nt{display:flex;gap:10px;padding:7px 0;border-top:1px solid var(--line);
+    font-size:11.5px;line-height:1.65}
+  .nt:first-child{border-top:0;padding-top:0}
+  .ntg{flex:0 0 42px;font-family:var(--font-mono);font-size:10.5px;color:var(--accent);
+    letter-spacing:.04em;padding-top:1px}
+  .ntt{color:var(--muted)}
+  .ntt b{color:var(--text);font-weight:600}
   .card{background:var(--surface-2);border:1px solid var(--line);
     border-left:2px solid var(--faint);border-radius:4px;padding:7px 9px;
     font-size:12px;line-height:1.5;cursor:pointer;transition:border-color .15s,background .15s;
@@ -209,6 +218,12 @@
     <h2><em>04</em>血脉</h2>
     <p class="hint">出身与父母；随代次滑块过滤，点开看它的 prompt。</p>
     <div class="cards" id="lin"></div>
+  </section>
+
+  <section class="panel" id="p-note">
+    <h2><em>05</em>运行注记</h2>
+    <p class="hint">数据自己声明的缺口与异常，逐条标代次；不改数、不藏数。</p>
+    <div id="notes"></div>
   </section>
 </main>
 
@@ -487,6 +502,43 @@
       (D.run_id || "—") + "），不是缺数据。";
   }
 
+  /* ------------------------------------------------ 05 运行注记 */
+  function renderNotes(){
+    var host = document.getElementById("notes");
+    if (!host) return;
+    var gens = D.generations || [];
+    var chalGens = 0, infraTotal = 0, others = [];
+
+    /* 每代 warnings 都在，但直接平铺会得到 21 条重复句。
+       两类高频句做聚合（挑战题未注入、infra 剔除），其余逐条按代次列出。 */
+    gens.forEach(function(g){
+      (g.warnings || []).forEach(function(w){
+        var s = String(w);
+        if (s.indexOf("未注入挑战题") !== -1){ chalGens++; return; }
+        var m = s.match(/^(\d+)\s*次调用属基础设施异常/);
+        if (m){ infraTotal += parseInt(m[1], 10); return; }
+        others.push({ gen: g.gen, text: s });
+      });
+    });
+
+    var rows = [];
+    if (chalGens){
+      rows.push(["全程", "挑战题 <b>0 次</b>注入（" + chalGens + " 代全部为空）：本运行器没有 challenge 队列。" +
+        "03 区那行「本次运行没有注入挑战」是数据缺口，不是渲染失败。"]);
+    }
+    if (infraTotal){
+      rows.push(["累计", "<b>" + infraTotal + " 次</b>调用属基础设施异常（推理截断 / 超时），" +
+        "已排除在能力分与判定之外——不算模型答错，也不进学习器。"]);
+    }
+    others.forEach(function(o){ rows.push(["g" + o.gen, esc(o.text)]); });
+
+    host.innerHTML = rows.length ? rows.map(function(r){
+      return '<div class="nt"><span class="ntg">' + r[0] + '</span>' +
+             '<span class="ntt">' + r[1] + '</span></div>';
+    }).join("") : '<div class="nt"><span class="ntg">—</span>' +
+      '<span class="ntt">本次运行没有声明任何异常。</span></div>';
+  }
+
   /* ------------------------------------------------------------ 启动 */
   function boot(){
     /* 数据真伪标记：缺字段也算不合格 —— 分不清真假比显示假数据更危险 */
@@ -528,6 +580,7 @@
     renderBars(D.generations.length - 1);
     renderChal();
     renderLineage(D.generations.length - 1);
+    renderNotes();
     explainFlatCurve();
 
     if ((D.problems || []).length){
