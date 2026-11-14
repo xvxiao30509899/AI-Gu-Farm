@@ -27,7 +27,24 @@
 
     · 没有出题（setter）角色，`set` 用"答案可用率"占位，非 B 的出题分
     · 没有 peer 互评，`slots.peer = 0`
-    · 挑战题需要 B 的 challenge 队列，本次不注入（`slots.challenge = 0`）
+    · 挑战题需要 challenge 队列，未接入前 `slots.challenge = 0`
+    · 初代 6 个体由 3 条种子铺满，只有 3 份不同基因（manifest 注明）
+
+**E/F 对照怎么跑**
+
+    E（演化）：python -m app.evolve_run --run-id E_x --gens 20
+    F（冻结）：python -m app.evolve_run --run-id F_x --gens 20 --freeze
+
+    F 不是"少跑"：`--freeze` 只关掉淘汰/交叉/变异，出题、作答、祖先评测全部照常，
+    调用数与 E 同口径。否则两条曲线不可比，"对照"就没有意义。
+
+**断点续跑**
+
+    python -m app.evolve_run --run-id E_x --gens 20 --resume
+
+    每代结束原子写 `runs/<run_id>/state.json`（含规则、逐 ID 分数序列、种群）。
+    中断后用 `--resume` 从最后一代接着跑，不重跑已完成部分。
+    条件（E/F）以快照为准，续跑时不许改。
 
 用法：
     export LLM_API_KEY=...
@@ -200,15 +217,96 @@ def mutate(p: dict, gid: str, gen: int, rule_text: str | None) -> dict:
                      "born_gen": gen + 1}}
 
 
+def next_population(pop: list[dict], ranking: list[str], state: dict,
+                    gen: int, gained: int, cfg: dict, *, freeze: bool = False) -> list[dict]:
+    """生成下一代。`freeze=True` 时基因原样返回 —— 这是 F 条件的全部实现。
+
+    **F 不是「少跑」，是「同样跑、只关掉选择」**
+
+    技术规格 §7 与大纲 §13 对 F 的定义是「gene 全程不变，依然产生题目并做全部评测」。
+    所以 F 必须照样出题、照样答题、照样记祖先失败率，调用数一点不少；
+    差别只有一个：不淘汰、不交叉、不变异。否则 E/F 的调用次数不同，
+    两条曲线不可比，F 也就失去了「对照」的意义。
+
+    ID 在 F 条件下保持不变，因为同一个体要被反复测量 —— `totals_hist` 按 ID 累积，
+    `fitness_window` 才有东西可取。若给 F 每代换新 ID，等于每代清零重测，
+    那就是「同基因不同样本」，不是「同一基因的历史」。
+    """
+    n_pop = int(cfg.get("n_pop", 6))
+    n_survive = int(cfg.get("n_survive", 3))
+    n_cross = int(cfg.get("n_crossover", 2))
+    n_mut = int(cfg.get("n_mutate", 1))
+
+    if freeze:
+        return list(pop)
+
+    survivors = [p for p in pop if p["_id"] in ranking[:n_survive]]
+    nxt = list(survivors)
+    for j in range(n_cross):
+        a, b = random.sample(survivors, 2)
+        nxt.append(crossover(a, b, f"G{gen:02d}X{j + 1}", gen))
+    rule_text = (state["rules"][-1]["text"] if gained and state.get("rules") else None)
+    for j in range(n_mut):
+        nxt.append(mutate(survivors[j % len(survivors)],
+                          f"G{gen:02d}M{j + 1}", gen, rule_text))
+    nxt = nxt[:n_pop]
+    for p in nxt:
+        p.setdefault("_id", p["meta"]["id"])
+    return nxt
+
+
+def load_resume(run_dir: Path) -> dict | None:
+    """读断点状态。没有 `state.json` 返回 None（调用方按全新运行处理）。
+
+    为什么单独存 `state.json` 而不从 `history.jsonl` 反推：
+    history 里没有 `state.rules`（学习到的规则）和逐 ID 的 `totals_hist`
+    （跨代分数序列）。少了前者，续跑段的 `check_instruction` 会突然变空；
+    少了后者，`fitness_window` 的均值会从零重算，第 1 代就把降噪关了。
+    两者都会让「续跑段」和「从头跑」不是同一个实验，所以必须单独快照。
+    """
+    state_path = run_dir / "state.json"
+    hist_path = run_dir / "history.jsonl"
+    if not state_path.exists() or not hist_path.exists():
+        return None
+    snap = json.loads(state_path.read_text(encoding="utf-8"))
+    lines = [json.loads(x) for x in hist_path.read_text(encoding="utf-8").splitlines() if x.strip()]
+    pop = [{"genes": p["genes"], "meta": p["meta"], "_id": p["meta"]["id"]}
+           for p in snap["population"]]
+    return {
+        "next_gen": int(snap["next_gen"]),
+        "population": pop,
+        "totals_hist": {k: list(v) for k, v in snap["totals_hist"].items()},
+        "state": snap["state"],
+        "lines": lines,
+        "freeze": bool(snap.get("freeze", False)),
+    }
+
+
+def save_state(run_dir: Path, *, next_gen: int, population: list[dict],
+               totals_hist: dict[str, list[float]], state: dict, freeze: bool) -> None:
+    """原子写：先写临时文件再 replace，避免半写状态被下次 resume 读到。"""
+    payload = {
+        "next_gen": next_gen,
+        "population": [{"genes": p["genes"], "meta": p["meta"]} for p in population],
+        "totals_hist": totals_hist,
+        "state": state,
+        "freeze": freeze,
+        "saved_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+    tmp = run_dir / "state.json.tmp"
+    tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, run_dir / "state.json")
+
+
 # ────────────────────────────── 主循环 ──────────────────────────────
-def run(run_id: str, gens: int | None = None, seed: int | None = None) -> dict:
+def run(run_id: str, gens: int | None = None, seed: int | None = None,
+        *, freeze: bool = False, resume: bool = False) -> dict:
     cfg = load_cfg()
     n_gen = int(gens if gens is not None else cfg.get("n_gen", 20))
     n_pop = int(cfg.get("n_pop", 6))
     n_common = int(cfg.get("n_common", 4))
-    n_survive = int(cfg.get("n_survive", 3))
-    n_cross = int(cfg.get("n_crossover", 2))
-    n_mut = int(cfg.get("n_mutate", 1))
+    # n_survive / n_crossover / n_mutate 只在 next_population() 里读，
+    # 主循环不再持有这三个值 —— 免得出现"两处各自读 config、改一处忘另一处"。
     window = int(cfg.get("fitness_window", 2))
     set_weight = float(cfg.get("set_weight", 2.0))
     bounty_v = float(cfg.get("bounty", 2.0))
@@ -222,27 +320,45 @@ def run(run_id: str, gens: int | None = None, seed: int | None = None) -> dict:
     run_dir = RUNS / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     hist_path = run_dir / "history.jsonl"
-    hist_path.write_text("", encoding="utf-8")
 
     state = seed_state()
     fp = frozen_fingerprint()
     model_id = L.preflight()["model"]
-    print(f"→ 运行 {run_id}：{n_gen} 代 × 每代 {n_pop} 个体，model={model_id}，"
-          f"预算 {max_tok} tok，并发 {workers}", flush=True)
 
-    pop = []
-    for i in range(n_pop):
-        genes = dict(SEED_GENES[i % len(SEED_GENES)])
-        pop.append({"genes": genes,
-                    "meta": {"id": f"G{i + 1:02d}", "parents": [], "origin": "seed",
-                             "born_gen": 0},
-                    "_id": f"G{i + 1:02d}"})
+    # ── 起始状态：全新运行 or 断点续跑 ──────────────────────────────
+    resumed = load_resume(run_dir) if resume else None
+    if resume and resumed is None:
+        raise SystemExit(f"✗ {run_dir} 没有可恢复的 state.json，不能 --resume")
 
-    totals_hist: dict[str, list[float]] = {p["_id"]: [] for p in pop}
+    if resumed:
+        start_gen = resumed["next_gen"]
+        pop = resumed["population"]
+        totals_hist = resumed["totals_hist"]
+        state = resumed["state"]
+        lines = resumed["lines"]
+        # 条件以快照为准：续跑不许悄悄把 E 变成 F，否则同一 run_id 下混了两种实验
+        if freeze != resumed["freeze"]:
+            print(f"⚠ 快照 freeze={resumed['freeze']}，本次传 {freeze}，以快照为准", flush=True)
+        freeze = resumed["freeze"]
+        print(f"↻ 从 g{start_gen} 续跑（已有 {len(lines)} 代，freeze={freeze}）", flush=True)
+    else:
+        start_gen = 0
+        hist_path.write_text("", encoding="utf-8")
+        pop = []
+        for i in range(n_pop):
+            genes = dict(SEED_GENES[i % len(SEED_GENES)])
+            pop.append({"genes": genes,
+                        "meta": {"id": f"G{i + 1:02d}", "parents": [], "origin": "seed",
+                                 "born_gen": 0},
+                        "_id": f"G{i + 1:02d}"})
+        totals_hist = {p["_id"]: [] for p in pop}
+        lines = []
+
     champion = pop[0]
-    lines: list[dict] = []
+    print(f"→ 运行 {run_id}：{n_gen} 代 × 每代 {n_pop} 个体，model={model_id}，"
+          f"预算 {max_tok} tok，并发 {workers}，freeze={freeze}", flush=True)
 
-    for gen in range(n_gen + 1):
+    for gen in range(start_gen, n_gen + 1):
         t_gen = time.time()
         check = build_check_instruction(state)
 
@@ -315,7 +431,8 @@ def run(run_id: str, gens: int | None = None, seed: int | None = None) -> dict:
 
         wall_ms = int((time.time() - t_gen) * 1000)
         rec = {
-            "schema_version": "5.1", "run_id": run_id, "condition": cfg.get("condition", "E"),
+            "schema_version": "5.1", "run_id": run_id,
+            "condition": "F" if freeze else cfg.get("condition", "E"),
             "gen": gen, "status": "completed", "M": n_pop, "refetch_round": 0,
             "task_counts": {"integral": sum(1 for r in common if r["family"] == "integral"),
                             "det": sum(1 for r in common if r["family"] == "det")},
@@ -336,23 +453,15 @@ def run(run_id: str, gens: int | None = None, seed: int | None = None) -> dict:
             ],
         }
 
-        # ── 4. 下一代：精英保留 + 交叉 + 变异
+        # ── 4. 下一代：精英保留 + 交叉 + 变异（F 条件下原样返回）
         if gen < n_gen:
-            survivors = [p for p in pop if p["_id"] in ranking[:n_survive]]
-            nxt = list(survivors)
-            for j in range(n_cross):
-                a, b = random.sample(survivors, 2)
-                nxt.append(crossover(a, b, f"G{gen:02d}X{j + 1}", gen))
-            rule_text = (state["rules"][-1]["text"] if gained and state["rules"] else None)
-            for j in range(n_mut):
-                nxt.append(mutate(survivors[j % len(survivors)],
-                                  f"G{gen:02d}M{j + 1}", gen, rule_text))
-            nxt = nxt[:n_pop]
+            nxt = next_population(pop, ranking, state, gen, gained, cfg, freeze=freeze)
             for p in nxt:
                 p.setdefault("_id", p["meta"]["id"])
                 # 新个体从零开始记分。**不能**继承父代的成绩历史：
                 # 那会让 est 变成"世袭均分"，页面上的分就不再是这一个体自己考的。
                 # 首代 n_samples=1，est 就是本代实测分，口径干净。
+                # F 条件下 ID 不变，这里命中已有键 —— 历史照常累积，正是要的。
                 totals_hist.setdefault(p["_id"], [])
             rec["next_population"] = [{"genes": p["genes"], "meta": p["meta"]} for p in nxt]
             pop = nxt
@@ -360,6 +469,9 @@ def run(run_id: str, gens: int | None = None, seed: int | None = None) -> dict:
         with hist_path.open("a", encoding="utf-8", newline="\n") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         lines.append(rec)
+        # 每代落一次快照，供 --resume 从断点续跑（原子写，不会读到半截文件）
+        save_state(run_dir, next_gen=gen + 1, population=pop,
+                   totals_hist=totals_hist, state=state, freeze=freeze)
 
         anc_txt = " ".join(f"{k.split('_')[0]}={v:.2f}" if v is not None else f"{k}=?"
                            for k, v in ancestor_out.items())
@@ -372,8 +484,15 @@ def run(run_id: str, gens: int | None = None, seed: int | None = None) -> dict:
         "backend": "real",
         "is_mock": False,
         "model_id": model_id,
+        # 锁定项必须显式写进 manifest，不能只留 config 的哈希：
+        # 哈希能证明"配置不同"，但读不出"不同在哪"，评审时无法核对锁了什么。
+        "condition": "F" if freeze else cfg.get("condition", "E"),
+        "freeze": freeze,
+        "fitness_window": window,
+        "data_seed": data_seed,
         "n_gen": n_gen,
         "n_pop": n_pop,
+        "resumed_from_gen": start_gen,
         "config_sha256": fp["config_sha256"],
         "prompts_sha256": fp["prompts_sha256"],
         "max_tokens_solver": max_tok,
@@ -384,14 +503,23 @@ def run(run_id: str, gens: int | None = None, seed: int | None = None) -> dict:
             "学习输入只取本代共同题的失败；祖先题是量尺，不参与训练，否则等于用考卷当练习册",
             "挑战题未注入，slots.challenge=0",
             f"规则最多保留 {MAX_RULES_IN_PROMPT} 条以控制提示词长度",
+            f"初代种群由 {len(SEED_GENES)} 条种子按 i%{len(SEED_GENES)} 铺满 {n_pop} 个个体，"
+            f"因此 {n_pop} 个个体中只有 {min(len(SEED_GENES), n_pop)} 份不同基因",
+            *(["F 条件：基因全程冻结，不淘汰/不交叉/不变异；出题与评测照常，调用数与 E 同口径"]
+              if freeze else []),
+            *([f"本次从 g{start_gen} 断点续跑，前 {start_gen} 代来自同目录已有 history"]
+              if start_gen else []),
         ],
     }
     (run_dir / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
 
     calls = sum(r["usage"]["call_count"] for r in lines)
-    print(f"✓ 完成 {len(lines)} 代 → {hist_path.relative_to(ROOT)}（{calls} 次调用）",
-          flush=True)
+    try:
+        shown = hist_path.relative_to(ROOT)
+    except ValueError:          # RUNS 被指到仓库外（测试、临时目录）
+        shown = hist_path
+    print(f"✓ 完成 {len(lines)} 代 → {shown}（{calls} 次调用）", flush=True)
     return manifest
 
 
@@ -400,13 +528,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--run-id", required=True)
     ap.add_argument("--gens", type=int, default=None, help="默认读 config.n_gen")
     ap.add_argument("--seed", type=int, default=None, help="题库抽样种子")
+    ap.add_argument("--freeze", action="store_true",
+                    help="F 条件：基因全程冻结，不淘汰/不交叉/不变异，出题与评测照常")
+    ap.add_argument("--resume", action="store_true",
+                    help="从 runs/<run-id>/state.json 断点续跑，不重跑已完成的代")
     ap.add_argument("--export", action="store_true", help="跑完顺手导出到 web/")
     a = ap.parse_args(argv)
 
     if not os.environ.get("LLM_API_KEY"):
         print("✗ 没有 LLM_API_KEY（config.api_key_env 指向它）", file=sys.stderr)
         return 2
-    run(a.run_id, a.gens, a.seed)
+    run(a.run_id, a.gens, a.seed, freeze=a.freeze, resume=a.resume)
 
     if a.export:
         from app.export import main as export_main
